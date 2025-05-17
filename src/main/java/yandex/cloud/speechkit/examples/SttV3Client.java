@@ -16,15 +16,33 @@ import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
+import com.google.protobuf.ByteString;
+import io.grpc.ManagedChannelBuilder;
+import io.grpc.Metadata;
+import io.grpc.stub.MetadataUtils;
+import io.grpc.stub.StreamObserver;
+import yandex.cloud.api.ai.stt.v3.RecognizerGrpc;
+import yandex.cloud.api.ai.stt.v3.Stt;
+
+import javax.sound.sampled.AudioSystem;
+import javax.sound.sampled.UnsupportedAudioFileException;
+import java.io.File;
+import java.io.IOException;
+import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+
 public class SttV3Client {
 
-    RecognizerGrpc.RecognizerStub client;
+    private final RecognizerGrpc.RecognizerStub client;
 
-    public SttV3Client( String host, int port, String apikey) {
+    public SttV3Client(String host, int port, String apikey) {
         client = sttV3Client(host, port, apikey);
     }
 
-
+    /**
+     * Recognize audio from file
+     */
     public String recognize(File wav) throws UnsupportedAudioFileException, IOException {
         // bidirectional streaming; we init a response observer then get a request observer from client
         var responseObserver = new SttStreamObserver();
@@ -36,9 +54,9 @@ public class SttV3Client {
 
         var frameRateHertz = (int) audioFormat.getFormat().getFrameRate();
 
-        System.out.println("sending  initial request");
+        System.out.println("sending initial request");
         // sending one initial request with recognition parameters to the server
-        requestObserver.onNext(initialSttRequest(frameRateHertz));
+        requestObserver.onNext(createInitialRequest(frameRateHertz, "ru-RU"));
 
         // chunk size in bytes : 0.2 seconds * 2 bytes per frame * frame rate
         var chunkStart = 0;
@@ -59,15 +77,24 @@ public class SttV3Client {
         return responseObserver.awaitResult(5);
     }
 
+    /**
+     * Start a streaming recognition session
+     * @param responseObserver Observer for handling server responses
+     * @return RequestObserver for sending audio chunks
+     */
+    public StreamObserver<Stt.StreamingRequest> startStreaming(StreamObserver<Stt.StreamingResponse> responseObserver) {
+        return client.recognizeStreaming(responseObserver);
+    }
 
-
-
-    private static Stt.StreamingRequest initialSttRequest(long frameRateHertz) {
+    /**
+     * Create an initial STT request with configuration
+     */
+    public static Stt.StreamingRequest createInitialRequest(long frameRateHertz, String languageCode) {
         var builder = Stt.StreamingRequest.newBuilder();
         builder.getSessionOptionsBuilder()
                 .setRecognitionModel(Stt.RecognitionModelOptions.newBuilder()
                         .setLanguageRestriction(Stt.LanguageRestrictionOptions.newBuilder()
-                                .addLanguageCode("ru-RU")
+                                .addLanguageCode(languageCode)
                                 .setRestrictionType(Stt.LanguageRestrictionOptions.LanguageRestrictionType.WHITELIST)
                                 .build())
                         .setAudioFormat(Stt.AudioFormatOptions.newBuilder()
@@ -79,6 +106,17 @@ public class SttV3Client {
                         .setAudioProcessingType(Stt.RecognitionModelOptions.AudioProcessingType.REAL_TIME)
                         .build());
         return builder.build();
+    }
+
+    /**
+     * Create an audio chunk request
+     */
+    public static Stt.StreamingRequest createAudioChunkRequest(byte[] audioData) {
+        return Stt.StreamingRequest.newBuilder()
+                .setChunk(Stt.AudioChunk.newBuilder()
+                        .setData(ByteString.copyFrom(audioData))
+                        .build())
+                .build();
     }
 
     static class SttStreamObserver implements StreamObserver<Stt.StreamingResponse> {
@@ -130,9 +168,7 @@ public class SttV3Client {
                 .withInterceptors(MetadataUtils.newAttachHeadersInterceptor(headers));
     }
 
-
     public static void main(String[] args) throws Exception {
-
         File wav;
         if (args.length > 0) {
             // get the wav file from arguments
@@ -148,7 +184,6 @@ public class SttV3Client {
 
         // init grpc connection
         var client = new SttV3Client("stt.api.cloud.yandex.net", 443, apikey);
-
 
         var response = client.recognize(wav);
         System.out.println("Recognized text is " + response);
